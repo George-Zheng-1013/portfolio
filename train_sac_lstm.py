@@ -20,24 +20,22 @@ class CustomLSTMExtractor(BaseFeaturesExtractor):
     :param observation_space: (gym.Space) The observation space of the environment.
     :param features_dim: (int) The dimension of the output features from the LSTM.
     """
-    def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 128):
+    def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 64):
         super().__init__(observation_space, features_dim)
         
         # Observation space shape is (window_size, n_features)
-        # We assume the input is 2D: [window_size, n_features]
         self.window_size = observation_space.shape[0]
         self.input_dim = observation_space.shape[1]
         
         # LSTM Layer
-        # input_size: number of features per time step
-        # hidden_size: dimension of the LSTM hidden state (and output features)
+        # Reduced hidden size to 64 to prevent overfitting on small datasets
         self.lstm = nn.LSTM(input_size=self.input_dim, hidden_size=features_dim, batch_first=True)
         
     def forward(self, observations: torch.Tensor) -> torch.Tensor:
         # observations shape: (batch_size, window_size, n_features)
         # LSTM output shape: (batch_size, window_size, hidden_size)
-        # We take the output of the last time step to capture the temporal context
         lstm_out, _ = self.lstm(observations)
+        # Take the output of the last time step
         return lstm_out[:, -1, :]
 
 # --- 2. Data Loading and Preprocessing ---
@@ -97,7 +95,7 @@ class PortfolioOptimizationEnv(gym.Env):
         self.last_action = np.ones(len(tickers)) / len(tickers)
 
         if seed is not None:
-            pass # Seeding handled externally or by gym wrappers in newer versions
+            pass 
 
     def get_data(self, start_date, end_date):
         data = self.df.copy()
@@ -105,28 +103,24 @@ class PortfolioOptimizationEnv(gym.Env):
         
         raw_data = data[self.tickers].copy()
 
-        # Calculate features
-        returns = data.pct_change()
-
-        mom_frames = []
-        for window in [5, 20]:
-            mom = data / data.shift(window) - 1
-            mom.columns = [f"{col}_mom_{window}" for col in data.columns]
-            mom_frames.append(mom)
-
-        vol = returns.rolling(window=20, min_periods=1).std()
-        vol.columns = [f"{col}_vol_20" for col in data.columns]
-
-        ma = data.rolling(window=20, min_periods=1).mean()
-        ma_dev = data / ma - 1
-        ma_dev.columns = [f"{col}_ma_dev_20" for col in data.columns]
-
-        returns.columns = [f"{col}_ret" for col in data.columns]
-
-        # Feature data
-        feature_data = pd.concat([returns, vol, ma_dev] + mom_frames, axis=1)
+        # --- FEATURE ENGINEERING CHANGE ---
+        # With LSTM, we remove manual rolling window features (volatility, momentum, etc.)
+        # and rely on the LSTM to extract temporal patterns from the raw returns.
         
+        # Calculate simple returns
+        returns = data.pct_change()
+        
+        # We can also add log returns if preferred, but simple returns are standard here.
+        # log_returns = np.log(data / data.shift(1))
+
+        # Only use returns as features. 
+        # The LSTM will see a sequence of returns [r_t-30, ..., r_t] and learn volatility/trend internally.
+        feature_data = returns
+        
+        # Clean up NaNs created by pct_change (first row)
         feature_data = feature_data.dropna()
+        
+        # Align raw_data to match the trimmed feature_data
         raw_data = raw_data.reindex(feature_data.index)
         
         return raw_data, feature_data
@@ -197,7 +191,7 @@ if __name__ == "__main__":
     df = load_data()
     
     # Parameters
-    tickers = df.columns.tolist() # Using all columns as tickers/assets for simplicity based on notebook
+    tickers = df.columns.tolist() 
     window_size = 30
     initial_balance = 10000
     
@@ -213,18 +207,19 @@ if __name__ == "__main__":
     env = DummyVecEnv([make_env])
     env = VecNormalize(env, norm_obs=True, norm_reward=False, clip_obs=10.0)
 
-    # --- KEY CHANGE: Define Policy Keyword Arguments to use LSTM ---
+    # --- LSTM Policy Configuration ---
+    # Reduced features_dim to 64 and net_arch to [64, 64] to prevent overfitting
     policy_kwargs = dict(
         features_extractor_class=CustomLSTMExtractor,
-        features_extractor_kwargs=dict(features_dim=128), # Output dimension of LSTM
-        net_arch=[128, 128] # MLP layers after LSTM
+        features_extractor_kwargs=dict(features_dim=64), 
+        net_arch=[64, 64] 
     )
 
     # Initialize SAC with custom policy
     model = SAC(
         "MlpPolicy",
         env,
-        policy_kwargs=policy_kwargs, # Pass the LSTM policy here
+        policy_kwargs=policy_kwargs, 
         verbose=1,
         device=device,
         learning_rate=3e-4,
@@ -234,8 +229,9 @@ if __name__ == "__main__":
         ent_coef="auto",
     )
 
-    print("Starting training with LSTM feature extractor...")
-    model.learn(total_timesteps=10000)
+    print("Starting training with LSTM feature extractor (Raw Returns only)...")
+    # Increased training steps to 50,000 to allow LSTM to converge
+    model.learn(total_timesteps=50000)
     print("Training finished.")
 
     # Save model
