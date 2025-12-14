@@ -25,7 +25,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # =========================================
-# data loading（顶层加载，子进程也能用）
+# data loading
 # =========================================
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -85,35 +85,31 @@ def preprocess_data(df_, tech_cols):
         )
         macd_df[col + "_macd"] = np.tanh(np.nan_to_num(macd, nan=0.0))
 
-        # 1. 乖离率 (Bias) = (Price - MA60) / MA60
-        # 暗示超跌 (负值大) 或 超买 (正值大)
+        # 1. 乖离率 (Bias)
         ma60 = talib.SMA(arr, timeperiod=60)
         bias = (arr - ma60) / ma60
         bias_df[col + "_bias60"] = np.nan_to_num(bias, nan=0.0)
 
         # 2. 价格分位数 (Price Quantile) - 过去 1 年 (252天)
-        # 用 rolling rank 并不是很快，这里用 rolling min/max 归一化近似
         # Position = (Price - Min252) / (Max252 - Min252)
-        # 0.0 = 最低价(极其便宜), 1.0 = 最高价(贵)
         rolling_min = price_data[col].rolling(252).min()
         rolling_max = price_data[col].rolling(252).max()
         quantile = (price_data[col] - rolling_min) / (rolling_max - rolling_min)
-        quantile_df[col + "_qtl252"] = np.nan_to_num(quantile, nan=0.5) # 默认填0.5中位数
+        quantile_df[col + "_qtl252"] = np.nan_to_num(quantile, nan=0.5)
 
     corr_df = pd.DataFrame(index=price_data.index)
     
     # 3. 宏观特征 (Macro Features)
     macro_df = pd.DataFrame(index=price_data.index)
     
-    # 3.1 VIX 替代品：标普500 波动率 (Market Fear)
-    # 高波意味着恐慌 (Risk-off)，低波意味着平稳 (Risk-on)
+    # 3.1 VIX 替代：标普500 波动率 (Market Fear)
     sp500_ret = price_data["SP500"].pct_change()
     market_vol = sp500_ret.rolling(20).std() * np.sqrt(252)
     
     # 3.2 美债收益率变化 (Delta Yield)
     # 利率飙升通常杀科技股估值
     us_debt = price_data["US_debt"]
-    delta_yield = us_debt.diff() # 简单差分，或者用 pct_change
+    delta_yield = us_debt.diff() # 简单差分
 
     # 4. 相对强弱 (Alpha)
     alpha_df = pd.DataFrame(index=price_data.index)
@@ -124,9 +120,7 @@ def preprocess_data(df_, tech_cols):
         corr = price_data[col].rolling(30).corr(sp)
         corr_df[col + "_corr"] = corr
         
-        # Macro propagation (把宏观特征复制给每个 asset，或者单独作为 global feature)
-        # 这里为了简单，把宏观特征拼接到每个 asset 的特征里，或者直接作为独立列
-        # 为了保持 (N_assets * K_features) 结构，通常的做法是把 global feature 拼进去
+        # Macro propagation
         macro_df[col + "_vix"] = market_vol
         macro_df[col + "_dyield"] = delta_yield
         
@@ -160,7 +154,7 @@ full_raw, full_features = preprocess_data(df, TECH_COLS)
 # =========================================
 class PortfolioOptimizationEnv(gym.Env):
     """
-    带 Risk Budgeting + 防 NaN/inf，并支持 reward 参数化的环境
+    带 Risk Budgeting + 防 NaN/inf，支持奖励参数化
     """
 
     def __init__(
@@ -236,14 +230,13 @@ class PortfolioOptimizationEnv(gym.Env):
         raw_action = np.nan_to_num(raw_action, nan=0.0, posinf=1.0, neginf=-1.0)
         # raw_action = np.clip(raw_action, -1.0, 1.0)
 
-        # 温度系数 (temperature) 越低，分布越尖锐（越重仓）
-        # 动态使用 env 初始化传入的 temperature 参数
+        # 温度系数 (temperature) 调整分布尖锐度
         
-        # 1. 原始动作是 [-1, 1], 先放大再过 softmax
+        # 1. 原始动作 -> softmax
         exp_values = np.exp(raw_action / self.temperature)
         weights = exp_values / np.sum(exp_values)
         
-        # 2. 强行截断微小权重，避免浮点数拖尾
+        # 2. 强行截断微小权重
         weights[weights < 0.001] = 0.0
         action = weights / np.sum(weights)
 
@@ -274,14 +267,14 @@ class PortfolioOptimizationEnv(gym.Env):
         self.balance *= (1.0 + port_ret)
 
         # =========================================
-        # 修改处：使用对数收益 (Log Return) + “左侧交易”重奖
+        # 奖励计算：对数收益 + 左侧交易奖励
         # =========================================
         
         # 1. 基础收益 (Log Return)
         log_ret = np.log1p(port_ret)
 
         # 2. 左侧交易奖励 (Left-Side Trading Bonus)
-        # 逻辑：如果持仓资产处于过去 20 天低点附近，给予额外奖励
+        # 如果持仓资产处于过去 20 天低点附近，给予额外奖励
         lookback = 20
         # 获取最近窗口价格用于计算 min
         s_idx = max(0, self.current_step - lookback)
@@ -297,19 +290,15 @@ class PortfolioOptimizationEnv(gym.Env):
                 is_dip[i] = False
 
         # 计算奖励：(持仓权重 * 是否底部) * 奖励系数
-        # 系数 0.05 非常大 (相当于 5% 的日收益)，符合“重奖”的要求，鼓励接飞刀/抄底
+        # 系数 0.05，鼓励接飞刀/抄底
         dip_bonus = float(np.sum(action * is_dip)) * 0.05
         
-        # 3. Sortino 优化 (惩罚下行波动)
-        # 只惩罚负收益，不惩罚正收益 (Good Volatility vs Bad Volatility)
-        # 使用下行平方惩罚: penalty = (min(0, r))^2 * coef
-        # 系数现在由 Optuna 调优
+        # 3. Sortino 优化 (惩罚下行收益)
         downside_risk = 0.0
         if port_ret < 0:
             downside_risk = (port_ret ** 2) * self.downside_risk_coef
         
-        # 4. 交易成本惩罚 (Transaction Cost Penalty)
-        # 抑制无效噪音交易，提高 Sharpe
+        # 4. 交易成本惩罚
         cost_penalty = float(turnover) * 0.002
 
         current_top=np.argmax(action)
@@ -318,7 +307,7 @@ class PortfolioOptimizationEnv(gym.Env):
         if current_top==last_top:
             holding_bonus=0.0005
 
-        reward = log_ret + dip_bonus - downside_risk - cost_penalty+holding_bonus+holding_bonus
+        reward = log_ret + dip_bonus - downside_risk - cost_penalty + holding_bonus
         
         reward = float(
             np.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
@@ -443,7 +432,7 @@ def objective(trial: optuna.Trial) -> float:
     policy_kwargs = dict(
         lstm_hidden_size=lstm_hidden_size,
         n_lstm_layers=n_lstm_layers,
-        net_arch=[dict(pi=[64, 64], vf=[64, 64])], #稍微加深一点 MLP
+        net_arch=[dict(pi=[64, 64], vf=[64, 64])],
     )
     
     # ---- make parallel train env (SubprocVecEnv) ----
@@ -517,7 +506,7 @@ def objective(trial: optuna.Trial) -> float:
 
 
 # =========================================
-# main: Windows 上必须这样写，才能安全使用 SubprocVecEnv + Optuna
+# main
 # =========================================
 N_TRIALS = 5  # 可以先小一点调试，OK 再改大
 
