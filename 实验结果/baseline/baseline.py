@@ -1,5 +1,6 @@
 import os
-os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import gymnasium as gym
 import numpy as np
@@ -13,15 +14,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.monitor import Monitor
 
-# =========================================
-# 数据准备：与 SAC with caan.py 使用相同的数据来源
-# =========================================
-# data/科技股票.csv:  包含 AAPL, GOOG, MSFT 日线
-# data/无风险.csv:    无风险利率 / 国债收益
-# data/指数和贵金属.csv: SP500 & Gold
-# （与 SAC 版本保持一致的数据管线）
-# -----------------------------------------
-
+# 数据准备
 tech_daily = pd.read_csv("data/科技股票.csv")
 tech_daily.set_index("date", inplace=True)
 tech_daily.columns = ["AAPL", "GOOG", "MSFT"]
@@ -39,24 +32,25 @@ df = pd.merge(df, tmp, how="left", on="date")
 df["date"] = pd.to_datetime(df.index)
 df.set_index("date", inplace=True)
 
-# 现金资产：价格恒为 1
+# 现金资产价格恒为 1
 df["Cash"] = 1.0
 
-# 时间序列插值 & 缺失值处理（与 SAC 版本一致）
+# 基本清洗
 df.interpolate(method="time", inplace=True)
 df.dropna(inplace=True)
 
-# 资产列表：与 SAC 一致（科技股 + US_debt + SP500 + Gold + Cash）
-tickers = ["AAPL", "GOOG", "MSFT", "SP500", "Gold", "US_debt","Cash"]
+# 资产列表
+tickers = ["AAPL", "GOOG", "MSFT", "SP500", "Gold", "US_debt", "Cash"]
 
-# 训练 / 测试时间切分：与 SAC 版本相同方式
+# 训练/测试切分
 full_range = df.index
-split_idx = int(len(full_range) * 0.8)
+split_idx = int(len(full_range) * 0.6)
 train_start_date = full_range[0]
 train_end_date = full_range[split_idx]
 test_start_date = full_range[split_idx + 1]
 test_end_date = full_range[-1]
 
+# 基本参数
 window_size = 30
 initial_balance = 10000.0
 seed = 8
@@ -68,9 +62,7 @@ print("Train period:", train_start_date.date(), "->", train_end_date.date())
 print("Test  period:", test_start_date.date(), "->", test_end_date.date())
 
 
-# =========================================
-# Baseline Env（保持原结构，只改数据来源 & 返回 weights）
-# =========================================
+# 环境：动作为权重(非负、归一)、观测为过去窗口价格
 class PortfolioOptimizationEnv(gym.Env):
     def __init__(
         self, tickers, window_size, start_date, end_date, initial_balance, seed=None
@@ -84,9 +76,9 @@ class PortfolioOptimizationEnv(gym.Env):
         # 使用和 SAC 相同的 df 数据，而不是 yfinance
         self.data = self.get_data(tickers, start_date, end_date)
 
-        # 动作为各资产权重（非负 + 归一化）
+        # 动作为各资产权重
         self.action_space = gym.spaces.Box(low=0.0, high=1.0, shape=(len(tickers),))
-        # 观测为过去 window_size 天的价格（与原 baseline 一致）
+        # 观测为过去 window_size 天的价格
         self.observation_space = gym.spaces.Box(
             low=0.0, high=np.inf, shape=(window_size, len(tickers))
         )
@@ -99,7 +91,7 @@ class PortfolioOptimizationEnv(gym.Env):
         self.current_step = None
 
     def get_data(self, tickers, start_date, end_date):
-        # 从全局 df 中切片，确保和 SAC 相同的数据来源
+        # 从全局 df 切片并清洗
         data = df.loc[start_date:end_date, tickers].copy()
         data = data.astype(np.float64)
         # 去掉有缺失的行
@@ -115,7 +107,7 @@ class PortfolioOptimizationEnv(gym.Env):
         if seed is not None:
             np.random.seed(seed)
             self.action_space.seed(seed)
-        
+
         # 重置组合
         self.balance = self.initial_balance
         self.current_step = self.window_size
@@ -128,7 +120,7 @@ class PortfolioOptimizationEnv(gym.Env):
         return obs.reshape(self.observation_space.shape), {}
 
     def step(self, action):
-        # 归一化动作为投资权重
+        # 归一化权重，计算组合收益与奖励，推进时间并返回观测
         action = np.asarray(action).ravel()
         action = np.nan_to_num(action, nan=0.0, posinf=0.0, neginf=0.0)
         action_sum = np.sum(action)
@@ -150,7 +142,7 @@ class PortfolioOptimizationEnv(gym.Env):
         port_ret = float(np.sum(asset_returns * weights))
         self.balance = self.balance * (1.0 + port_ret)
 
-        # 奖励：组合对数收益（保持 baseline 逻辑不变）
+        # 奖励为对数收益
         reward = float(np.log(self.balance / (prev_balance + 1e-8)))
 
         # 时间推进
@@ -169,9 +161,16 @@ class PortfolioOptimizationEnv(gym.Env):
             "weights": weights,  # 方便后续画权重堆叠图，与 SAC 一致
         }
 
-        return obs.reshape(self.observation_space.shape), reward, terminated, truncated, info
+        return (
+            obs.reshape(self.observation_space.shape),
+            reward,
+            terminated,
+            truncated,
+            info,
+        )
 
-# 日志目录（训练 reward monitor）
+
+# 日志目录与 Monitor
 log_dir = "./sb3_logs_baseline_ppo"
 os.makedirs(log_dir, exist_ok=True)
 monitor_path = os.path.join(log_dir, "monitor.csv")
@@ -218,16 +217,7 @@ else:
     print("No episodes logged in monitor file; training may have terminated too early.")
 
 
-# =========================================
-# 使用与 SAC 相同风格的回测 + 指标计算 + 画图
-# =========================================
-# 在测试集上回测 PPO 策略，并画出：
-# - RL 策略 vs 各资产的归一化收益曲线
-# - 权重堆叠图
-# - 输出 CAGR / Sharpe / Sortino / MaxDD / Calmar
-# （方便和 SAC with caan.py 直接对比）
-# -----------------------------------------
-
+# 回测与指标
 # ---------- 构建测试环境并回测 ----------
 test_env = DummyVecEnv(
     [
@@ -309,8 +299,7 @@ if len(balances_arr) > 0:
     )
     print("-" * 40)
     print(
-        f"Final Balance:    {balances_arr[-1]:.2f} "
-        f"(Initial: {balances_arr[0]:.2f})"
+        f"Final Balance:    {balances_arr[-1]:.2f} " f"(Initial: {balances_arr[0]:.2f})"
     )
     print(f"Total Growth:     {total_growth:.4f}x")
     print(f"CAGR (Ann. Ret):  {cagr:.2%}")
@@ -321,15 +310,59 @@ if len(balances_arr) > 0:
     print(f"Calmar Ratio:     {calmar:.4f}")
     print("-" * 40)
 
-    # ---------- 画收益曲线（与 SAC 相同风格） ----------
+    # 保存回测数据与指标
+    result_df = pd.DataFrame(
+        {
+            "date": dates,
+            "portfolio_value": balances_arr,
+            "daily_return": [0.0] + list(daily_returns.values),
+        }
+    )
+    result_df.to_csv("ppo_baseline_results.csv", index=False)
+    print("\nBacktest results saved to: ppo_baseline_results.csv")
+
+    metrics_summary = pd.DataFrame(
+        {
+            "Metric": [
+                "Initial Balance",
+                "Final Balance",
+                "Total Growth",
+                "CAGR",
+                "Annualized Volatility",
+                "Sharpe Ratio",
+                "Sortino Ratio",
+                "Max Drawdown",
+                "Calmar Ratio",
+                "Start Date",
+                "End Date",
+                "Duration (Days)",
+            ],
+            "Value": [
+                f"{balances_arr[0]:.2f}",
+                f"{balances_arr[-1]:.2f}",
+                f"{total_growth:.4f}x",
+                f"{cagr:.4f}",
+                f"{ann_vol:.4f}",
+                f"{sharpe:.4f}",
+                f"{sortino:.4f}",
+                f"{max_drawdown:.4f}",
+                f"{calmar:.4f}",
+                str(start_date_.date()),
+                str(end_date_.date()),
+                str(duration_days),
+            ],
+        }
+    )
+    metrics_summary.to_csv("ppo_baseline_metrics.csv", index=False)
+    print("Performance metrics saved to: ppo_baseline_metrics.csv")
+
+    # 收益曲线
     asset_cols = tickers
     prices = df.loc[dates, asset_cols].copy()
     norm_prices = prices / prices.iloc[0]
     norm_strategy = balances_arr / balances_arr[0]
 
-    strategy_df = pd.DataFrame(
-        {"date": pd.to_datetime(dates), "value": norm_strategy}
-    )
+    strategy_df = pd.DataFrame({"date": pd.to_datetime(dates), "value": norm_strategy})
     strategy_df = strategy_df.sort_values("date").drop_duplicates("date")
 
     plt.figure(figsize=(12, 6))
@@ -348,9 +381,7 @@ if len(balances_arr) > 0:
         linewidth=2,
         color="black",
     )
-    plt.title(
-        f"PPO Baseline Backtest: {start_date_.date()} to {end_date_.date()}"
-    )
+    plt.title(f"PPO Baseline Backtest: {start_date_.date()} to {end_date_.date()}")
     plt.xlabel("Date")
     plt.ylabel("Normalized Value")
     plt.legend()
@@ -359,7 +390,7 @@ if len(balances_arr) > 0:
     plt.savefig("ppo_baseline_backtest.png")
     plt.show()
 
-    # ---------- 权重堆叠图（与 SAC 相同风格） ----------
+    # 权重堆叠图与统计
     if len(weights_history) > 0:
         sns.set_theme(style="whitegrid")
         df_weights = pd.DataFrame(weights_history, columns=tickers)
@@ -394,3 +425,5 @@ if len(balances_arr) > 0:
         )
 else:
     print("Not enough data points in backtest to compute performance metrics.")
+
+print("\n===== PPO Baseline Backtest Completed =====")

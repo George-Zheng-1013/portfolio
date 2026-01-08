@@ -184,7 +184,6 @@ class PortfolioOptimizationEnv(gym.Env):
         self.downside_risk_coef = downside_risk_coef
 
         # Slice data for this environment instance
-        # Slice data for this environment instance
         self.raw_data = raw_df_all.loc[start_date:end_date]
         self.feature_data = feature_df_all.loc[start_date:end_date]
         # Validation

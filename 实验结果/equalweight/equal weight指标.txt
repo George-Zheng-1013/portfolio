@@ -1,0 +1,30 @@
+(py310) PS D:\HP\OneDrive\Desktop\学校\课程\网课\portfolio> & D:/Develop/miniconda/envs/py310/python.exe d:/HP/OneDrive/Desktop/学校/课程/网课/portfolio/实验结果/equalweight/equalweight.py
+数据时间范围:
+训练集: 2015-11-09 -> 2021-12-09
+测试集: 2021-12-10 -> 2025-11-28
+
+==================================================
+Equal Weight Strategy Backtest (Tech Stocks + Gold + SP500: AAPL, GOOG, MSFT, Gold, SP500)
+==================================================
+
+Strategy Configuration:
+  Assets: AAPL, GOOG, MSFT, Gold, SP500
+  Weights: [0.2 0.2 0.2 0.2 0.2]
+
+Performance Metrics (2021-12-10 to 2025-11-28)
+----------------------------------------
+Initial Balance:     10000.00
+Final Balance:       18759.86
+Total Growth:        1.8760x
+CAGR (Ann. Return):  17.19%
+Ann. Volatility:     18.54%
+Sharpe Ratio:        0.9267
+Sortino Ratio:       1.3331
+Max Drawdown:        -27.14%
+Calmar Ratio:        0.6333
+----------------------------------------
+
+回测结果已保存至: equalweight_results.csv
+
+Equal Weight Strategy Backtest Completed!
+(py310) PS D:\HP\OneDrive\Desktop\学校\课程\网课\portfolio> 
